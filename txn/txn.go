@@ -73,25 +73,26 @@ func (r pgRunner) Do(ctx context.Context, fn func(Stores) error) error {
 // It does NOT roll back on error: the fakes have no transaction to undo. A test
 // that needs to prove atomicity needs a real database, which is the point of
 // the integration suite, and is why the inbox bug could ship green.
-func Memory() Runner {
-	return &memRunner{
+func Memory() *Memory {
+	return &Memory{
 		idem: idempotency.NewMemoryStore(),
 		ob:   outbox.NewMemoryOutbox(),
 		in:   inbox.NewMemoryStore(),
 	}
 }
 
-type memRunner struct {
+// Memory is the in-memory Runner. It is a concrete type, not a Runner, so a
+// test can reach its Outbox to assert on what was emitted while production code
+// — which holds a Runner — cannot.
+type Memory struct {
 	idem *idempotency.MemoryStore
 	ob   *outbox.MemoryOutbox
 	in   *inbox.MemoryStore
 }
 
-func (r *memRunner) Do(_ context.Context, fn func(Stores) error) error {
+func (r *Memory) Do(_ context.Context, fn func(Stores) error) error {
 	return fn(Stores{Idempotency: r.idem, Outbox: r.ob, Inbox: r.in})
 }
 
 // Outbox exposes the in-memory outbox so tests can assert on what was emitted.
-// Present only on the memory runner, deliberately: production code that reaches
-// for it will not compile against a Runner.
-func (r *memRunner) Outbox() *outbox.MemoryOutbox { return r.ob }
+func (r *Memory) Outbox() *outbox.MemoryOutbox { return r.ob }
