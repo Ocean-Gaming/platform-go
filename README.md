@@ -74,12 +74,15 @@ Every service should run both harnesses. See `conformance_memory_test.go` and
 
     go get github.com/Ocean-Gaming/platform-go
 
-This is a **private** module, so `go` needs credentials:
+The module is **public**, so nothing needs credentials — locally or in CI. It carries no
+business logic and no secrets: it is tenant propagation, idempotency, an outbox, an inbox,
+a config snapshot, fail-closed gates and the gRPC conventions. The gambling domain lives
+in the service repos, which stay private.
 
-    export GOPRIVATE='github.com/Ocean-Gaming/*'
-
-Locally that is enough if `gh` has configured a git credential helper. In CI see the
-`platform module` step in a consuming repo's `ci.yml`.
+That is a deliberate trade. Kept private, every one of 36 consuming repos would have
+needed a personal access token as a CI secret, because a repository's default
+`GITHUB_TOKEN` cannot read a sibling private repo — 36 secrets to rotate, on the
+dependency every service builds against.
 
 ## Tests
 
