@@ -46,13 +46,27 @@ func OpenWith(t *testing.T, extra ...fs.FS) *sql.DB {
 		t.Fatalf("ping %s: %v", DSN(), err)
 	}
 
+	// Truncate BEFORE applying, then let the migrations run: seed rows written
+	// by a migration (currencies, reference data) are restored by the same
+	// statement that created the table, because seeds are ON CONFLICT DO
+	// NOTHING. Truncating afterwards would wipe seed data that other tables
+	// have foreign keys to, and the alternative — a per-service list of tables
+	// to spare — is the hardcoded list this replaced.
+	truncateAll(t, db)
 	apply(t, db, platform.Migrations())
 	for _, e := range extra {
 		apply(t, db, e)
 	}
 
-	// Truncate whatever exists rather than a hardcoded list: a service adds
-	// tables, and a list that silently misses one leaks state between tests.
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// truncateAll empties every table in the public schema. Whatever exists, rather
+// than a hardcoded list: a service adds tables, and a list that silently misses
+// one leaks state between tests.
+func truncateAll(t *testing.T, db *sql.DB) {
+	t.Helper()
 	rows, err := db.Query(
 		`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`)
 	if err != nil {
@@ -72,8 +86,6 @@ func OpenWith(t *testing.T, extra ...fs.FS) *sql.DB {
 			t.Fatalf("truncate: %v", err)
 		}
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
 }
 
 func apply(t *testing.T, db *sql.DB, src fs.FS) {
