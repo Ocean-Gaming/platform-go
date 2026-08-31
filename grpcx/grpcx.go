@@ -117,6 +117,8 @@ func firstMeta(ctx context.Context, key string) string {
 //	config.ErrUnknownTenant      -> PERMISSION_DENIED   (fail closed)
 //	idempotency.ErrFingerprint.. -> FAILED_PRECONDITION (fingerprint_mismatch; state-dependent, terminal)
 //	idempotency.ErrInFlight      -> ABORTED             (in_flight; the one retryable conflict)
+//	idempotency.ErrNotClaimed    -> INTERNAL            (idempotency_not_claimed; a wiring bug,
+//	                                                     tagged so it is not mistaken for an outage)
 //	anything else                -> INTERNAL, message scrubbed
 //
 // NOT UNAUTHENTICATED for a missing tenant: that trips client credential
@@ -133,6 +135,12 @@ func Status(err error) error {
 		return withReason(codes.FailedPrecondition, "idempotency key reused with a different request", "fingerprint_mismatch")
 	case errors.Is(err, idempotency.ErrInFlight):
 		return withReason(codes.Aborted, "an identical request is in flight", "in_flight")
+	case errors.Is(err, idempotency.ErrNotClaimed):
+		// Complete without Claim is a wiring bug in the service, not an outage.
+		// Left unmapped it reached callers as a scrubbed INTERNAL, which is
+		// indistinguishable from the database being down — so the on-call
+		// investigates infrastructure while the fault is in the command.
+		return withReason(codes.Internal, "internal error", "idempotency_not_claimed")
 	default:
 		return status.Error(codes.Internal, "internal error")
 	}

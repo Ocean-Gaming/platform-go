@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/Ocean-Gaming/platform-go/pg"
@@ -98,11 +99,27 @@ func (r *PostgresReader) MarkPublished(ctx context.Context, ids []string) error 
 	if len(ids) == 0 {
 		return nil
 	}
-	for _, id := range ids {
-		if _, err := r.db.ExecContext(ctx,
-			`UPDATE outbox SET published_at = now() WHERE id = $1`, id); err != nil {
-			return err
+	// One statement, not one per id: the relay's default batch is 100, so a
+	// loop here is 100 round trips per tick on the hot path, in every service.
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE outbox SET published_at = now() WHERE id = ANY($1)`, pq(ids))
+	return err
+}
+
+// pq renders a string slice as a Postgres array literal. The driver handles
+// []string for ANY() only with its own array type; this keeps the store free of
+// a driver-specific dependency.
+func pq(ids []string) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
 		}
+		b.WriteByte('"')
+		b.WriteString(strings.ReplaceAll(id, `"`, `\"`))
+		b.WriteByte('"')
 	}
-	return nil
+	b.WriteByte('}')
+	return b.String()
 }
