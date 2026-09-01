@@ -20,7 +20,29 @@ jobs:
             exit 1
           fi
       - run: go build ./...
-      - run: go vet ./...
+      # vet WITH the build tag: `go vet ./...` silently skips //go:build
+      # integration files, which in this platform is most of the test code —
+      # the double-spend hammer and the property suite among it.
+      - name: vet (including integration-tagged code)
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      # staticcheck finds what vet does not. Pinned so a new release cannot
+      # turn CI red without a commit.
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          staticcheck ./...
+          staticcheck -tags=integration ./...
+
+      # Known CVEs in dependencies. This one CAN go red with no code change —
+      # that is the point: a vulnerability published today is news today, and
+      # on a licensed money platform it is a compliance question, not a chore.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          govulncheck ./...
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
