@@ -58,6 +58,21 @@ func OpenWith(t *testing.T, extra ...fs.FS) *sql.DB {
 		apply(t, db, e)
 	}
 
+	// database/sql's zero MaxOpenConns means UNLIMITED, and a test that fans
+	// out one goroutine per fixture then opens one connection per goroutine.
+	// Postgres stops that at max_connections (100 by default) with `FATAL:
+	// sorry, too many clients already`, which arrives as whatever query lost
+	// the race — so a concurrency test reports its own invariant broken when
+	// nothing reached the database at all. That failure is timing-dependent,
+	// which means it passes on a developer's machine and fails on CI.
+	//
+	// Bounded here rather than in each service: every caller of this helper
+	// shares the constraint, and a per-service bound only moves after someone
+	// has spent an afternoon on the symptom. A test that genuinely wants more
+	// concurrency than this can raise it on the returned handle.
+	db.SetMaxOpenConns(16)
+	db.SetMaxIdleConns(16)
+
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
