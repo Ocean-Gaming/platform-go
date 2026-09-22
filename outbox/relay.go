@@ -34,15 +34,53 @@ func (r *Relay) Run(ctx context.Context) error {
 	t := time.NewTicker(r.Interval)
 	defer t.Stop()
 
+	// How long this relay has been failing, not just that it failed again.
+	//
+	// "Nothing is lost" below is true per tick and misleading over hours. A
+	// relay that cannot publish is a service whose events have stopped
+	// reaching every consumer downstream, and the old log said the same
+	// sentence once a second with no way to tell the first failure from the
+	// four thousandth. wallet-ledger emitted ~4,500 identical lines over 75
+	// minutes in September 2026 and nothing escalated, because every line
+	// looked exactly like a transient blip. These two fields are what makes
+	// "this relay has been down for 75 minutes" a thing an alert can say.
+	var fails int
+	var since time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			if n, err := r.Tick(ctx); err != nil {
+			n, err := r.Tick(ctx)
+			if err != nil {
 				// Log and keep going. The rows are still in the outbox, so the
 				// next tick retries them; nothing is lost.
-				r.Log.ErrorContext(ctx, "outbox relay tick failed", "error", err, "published", n)
+				if fails == 0 {
+					since = time.Now()
+				}
+				fails++
+				r.Log.ErrorContext(ctx, "outbox relay tick failed",
+					"error", err, "published", n,
+					"consecutive_failures", fails,
+					"failing_for", time.Since(since).Round(time.Second).String())
+				continue
+			}
+			if fails > 0 {
+				// Recovery is reported at INFO because the outage was: an
+				// operator watching the errors stop cannot otherwise tell a
+				// relay that recovered from a relay that died.
+				r.Log.InfoContext(ctx, "outbox relay recovered",
+					"after_failures", fails,
+					"was_failing_for", time.Since(since).Round(time.Second).String())
+				fails = 0
+			}
+			if n > 0 {
+				// The success path, at debug. A relay that has silently stopped
+				// draining looks identical to an idle one in the logs, so
+				// proving it is alive needed a SIGQUIT and a goroutine dump.
+				// It stays at debug because a healthy relay ticks every second.
+				r.Log.DebugContext(ctx, "outbox relay published", "count", n)
 			}
 		}
 	}
