@@ -38,6 +38,7 @@ A template is for what each service *should change*. This is for what none of th
 | `gate` | 6 — licence gates fail closed |
 | `grpcx` | the wire contract: metadata names, interceptor chain, error→status |
 | `obs` | structured logging carrying tenant and correlation id |
+| `stafftoken` | a staff command (attribution `staff:…`) reaches an owner only with operations-service's signed token for this service, tenant and staff member; fail closed when unconfigured (meta-repo ADR-0060) |
 | `pg` | `InTx`, the transaction seam |
 | `pgtest`, `platformtest` | the test harness and the conformance suite |
 
