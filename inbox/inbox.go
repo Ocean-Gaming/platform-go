@@ -20,10 +20,11 @@ type Store interface {
 	// is the first time. Implementations must make the check-and-insert atomic;
 	// a read-then-write race here reintroduces double processing.
 	//
-	// eventID must be a UUID. It is typed as string because that is what the
-	// event envelope carries, but the Postgres store writes it to a UUID column
-	// and a non-UUID value fails at runtime with SQLSTATE 22P02 — after passing
-	// every test against the in-memory store, which accepts any string.
+	// eventID is the envelope's event_id as the producer's schema defines it:
+	// a UUID for most, an `evt_`-prefixed ULID for bonus-engine. Any stable
+	// string dedups; the Postgres column is TEXT since migration 0002 (meta-repo
+	// ADR-0061). Before that it was UUID, and every non-UUID id failed with
+	// SQLSTATE 22P02 after passing every test against the in-memory store.
 	MarkProcessed(ctx context.Context, consumer, eventID string) (first bool, err error)
 }
 

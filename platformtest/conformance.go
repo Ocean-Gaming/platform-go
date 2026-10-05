@@ -33,13 +33,14 @@ const (
 	acme   = tenant.ID("acme")
 	globex = tenant.ID("globex") // rule 8 — never fewer than two, including here
 
-	// Event ids are UUIDs. The Store interface types them as string, but the
-	// inbox.event_id column is UUID, so a non-UUID id passes every unit test
-	// against the fake and fails in production with SQLSTATE 22P02. This suite
-	// found that; the constraint is documented on inbox.Store.
+	// Most event ids are UUIDs; bonus-engine's are `evt_`-prefixed ULIDs (its
+	// registry schemas). While inbox.event_id was a UUID column, the ULID form
+	// passed every test against the fake and failed in production with SQLSTATE
+	// 22P02 (meta-repo ADR-0061), so both forms run here.
 	evtDup    = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
 	evtShared = "3f2504e0-4f89-41d3-9a0c-0305e82c3302"
 	evtOther  = "3f2504e0-4f89-41d3-9a0c-0305e82c3303"
+	evtULID   = "evt_01m3xv7mjv5tze0p0fx7c4dt49"
 )
 
 // RunConformance runs every invariant both implementations must uphold.
@@ -150,6 +151,26 @@ func inboxConformance(t *testing.T, h Harness) {
 		for i := 0; i < 2; i++ {
 			if err := h.Do(ctx, func(_ idempotency.Store, in inbox.Store) error {
 				return inbox.Handle(ctx, in, "consumer-a", evtDup, func(context.Context) error {
+					runs++
+					return nil
+				})
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if runs != 1 {
+			t.Fatalf("handler ran %d times for one event; want 1", runs)
+		}
+	})
+
+	// The registry's other id form. A UUID column refused it, so every
+	// consumer of bonus-engine's events dead-lettered all of them.
+	t.Run("a prefixed ULID event id dedups like a UUID", func(t *testing.T) {
+		ctx := ctxFor(acme)
+		runs := 0
+		for i := 0; i < 2; i++ {
+			if err := h.Do(ctx, func(_ idempotency.Store, in inbox.Store) error {
+				return inbox.Handle(ctx, in, "consumer-u", evtULID, func(context.Context) error {
 					runs++
 					return nil
 				})
