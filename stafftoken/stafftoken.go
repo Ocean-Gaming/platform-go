@@ -252,11 +252,18 @@ func (v *Verifier) fetch(ctx context.Context) (map[string]*ecdsa.PublicKey, erro
 		}
 		x, errX := base64.RawURLEncoding.DecodeString(k.X)
 		y, errY := base64.RawURLEncoding.DecodeString(k.Y)
-		if errX != nil || errY != nil {
+		if errX != nil || errY != nil || len(x) > 32 || len(y) > 32 {
 			continue
 		}
-		pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-		if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
+		// The JWK's coordinates as the SEC 1 uncompressed point (0x04 ‖ X ‖ Y, each 32 bytes for
+		// P-256). ParseUncompressedPublicKey performs the on-curve check; setting PublicKey.X/.Y
+		// and calling Curve.IsOnCurve is deprecated (staticcheck SA1019 on Go 1.26).
+		point := make([]byte, 65)
+		point[0] = 4
+		copy(point[33-len(x):33], x)
+		copy(point[65-len(y):], y)
+		pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+		if err != nil {
 			continue
 		}
 		out[k.Kid] = pub
