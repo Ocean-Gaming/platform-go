@@ -31,6 +31,11 @@ jobs:
       # staticcheck finds what vet does not. Pinned so a new release cannot
       # turn CI red without a commit.
       - name: staticcheck
+        # staticcheck 2026.2.1 needs Go 1.26. A bare GOTOOLCHAIN=auto picks the newest 1.26.x in the
+        # release index, and on a release day that download can lag the index by hours (go1.26.9
+        # answered 404 on 2026-10-08). go1.26.8+auto builds the tool on a toolchain known to exist.
+        env:
+          GOTOOLCHAIN: go1.26.8+auto
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
           staticcheck ./...
