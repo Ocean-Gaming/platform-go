@@ -29,6 +29,9 @@ func (s *MemoryStore) Claim(ctx context.Context, key Key, fingerprint string) (R
 	if err != nil {
 		return Record{}, false, err
 	}
+	if err := check(key, fingerprint); err != nil {
+		return Record{}, false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

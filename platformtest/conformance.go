@@ -14,6 +14,7 @@ package platformtest
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Ocean-Gaming/platform-go/idempotency"
@@ -179,6 +180,49 @@ func idempotencyConformance(t *testing.T, h Harness) {
 		}
 	})
 
+	// The bounds migrations/0003 puts on the column, applied before the write by both stores.
+	// Lengths are characters: 255 two-byte runes are 510 bytes and still fit.
+	t.Run("a key outside 1 to 255 characters is refused", func(t *testing.T) {
+		ctx := ctxFor(acme)
+		for name, key := range map[string]idempotency.Key{
+			"empty":   "",
+			"256":     idempotency.Key(strings.Repeat("k", 256)),
+			"256 é's": idempotency.Key(strings.Repeat("é", 256)),
+		} {
+			err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+				_, _, err := idem.Claim(ctx, key, fp)
+				return err
+			})
+			if !errors.Is(err, idempotency.ErrInvalidKey) {
+				t.Errorf("%s: want ErrInvalidKey, got %v", name, err)
+			}
+		}
+		if err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+			_, _, err := idem.Claim(ctx, idempotency.Key(strings.Repeat("é", 255)), fp)
+			return err
+		}); err != nil {
+			t.Fatalf("a key of 255 characters (510 bytes) was refused: %v", err)
+		}
+	})
+
+	t.Run("a fingerprint that is not a lowercase hex SHA-256 is refused", func(t *testing.T) {
+		ctx := ctxFor(acme)
+		for name, bad := range map[string]string{
+			"placeholder": "fp",
+			"uppercase":   strings.ToUpper(fp),
+			"63 chars":    fp[:63],
+			"65 chars":    fp + "0",
+		} {
+			err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+				_, _, err := idem.Claim(ctx, "k-bad-fp", bad)
+				return err
+			})
+			if !errors.Is(err, idempotency.ErrInvalidFingerprint) {
+				t.Errorf("%s: want ErrInvalidFingerprint, got %v", name, err)
+			}
+		}
+	})
+
 	// Rule 2 — no tenant, no command.
 	t.Run("a claim with no tenant is refused", func(t *testing.T) {
 		err := h.Do(context.Background(), func(idem idempotency.Store, _ inbox.Store) error {
@@ -249,6 +293,41 @@ func inboxConformance(t *testing.T, h Harness) {
 		}
 		if runs != 2 {
 			t.Fatalf("one tenant suppressed another's event: handler ran %d times, want 2", runs)
+		}
+	})
+
+	// An empty id would dedup every id-less event of a consumer into one. The id's format is
+	// never checked (ADR-0061); only its length, in characters.
+	t.Run("an event id or consumer outside 1 to 255 characters is refused", func(t *testing.T) {
+		ctx := ctxFor(acme)
+		cases := []struct {
+			name, consumer, eventID string
+			want                    error
+		}{
+			{"empty id", "consumer-l", "", inbox.ErrInvalidEventID},
+			{"256-character id", "consumer-l", strings.Repeat("e", 256), inbox.ErrInvalidEventID},
+			{"empty consumer", "", evtOther, inbox.ErrInvalidConsumer},
+			{"256-character consumer", strings.Repeat("c", 256), evtOther, inbox.ErrInvalidConsumer},
+		}
+		for _, c := range cases {
+			err := h.Do(ctx, func(_ idempotency.Store, in inbox.Store) error {
+				return inbox.Handle(ctx, in, c.consumer, c.eventID, func(context.Context) error {
+					t.Errorf("%s: the handler ran", c.name)
+					return nil
+				})
+			})
+			if !errors.Is(err, c.want) {
+				t.Errorf("%s: want %v, got %v", c.name, c.want, err)
+			}
+		}
+		runs := 0
+		if err := h.Do(ctx, func(_ idempotency.Store, in inbox.Store) error {
+			return inbox.Handle(ctx, in, "consumer-l", strings.Repeat("é", 255), func(context.Context) error {
+				runs++
+				return nil
+			})
+		}); err != nil || runs != 1 {
+			t.Fatalf("an event id of 255 characters (510 bytes): runs=%d err=%v", runs, err)
 		}
 	})
 

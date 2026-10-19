@@ -37,6 +37,8 @@ func TestStatusMapping(t *testing.T) {
 		{idempotency.ErrInFlight, codes.Aborted, "in_flight"},
 		{idempotency.ErrNotClaimed, codes.Internal, "idempotency_not_claimed"},
 		{idempotency.ErrAlreadyCompleted, codes.Internal, "idempotency_already_completed"},
+		{idempotency.ErrInvalidKey, codes.InvalidArgument, "idempotency_key_invalid"},
+		{idempotency.ErrInvalidFingerprint, codes.Internal, "idempotency_fingerprint_invalid"},
 		{context.Canceled, codes.Canceled, ""},
 		{context.DeadlineExceeded, codes.DeadlineExceeded, ""},
 		// Wrapped, as a driver or a store returns them.

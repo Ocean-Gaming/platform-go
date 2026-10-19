@@ -119,10 +119,14 @@ func firstMeta(ctx context.Context, key string) string {
 //	config.ErrUnknownTenant      -> PERMISSION_DENIED   (fail closed)
 //	idempotency.ErrFingerprint.. -> FAILED_PRECONDITION (fingerprint_mismatch; state-dependent, terminal)
 //	idempotency.ErrInFlight      -> ABORTED             (in_flight; the one retryable conflict)
+//	idempotency.ErrInvalidKey    -> INVALID_ARGUMENT    (idempotency_key_invalid; empty or over 255
+//	                                                     characters, the caller's to fix)
 //	idempotency.ErrNotClaimed    -> INTERNAL            (idempotency_not_claimed; a wiring bug,
 //	                                                     tagged so it is not mistaken for an outage)
 //	idempotency.ErrAlreadyComp.. -> INTERNAL            (idempotency_already_completed; a wiring
 //	                                                     bug of the same kind)
+//	idempotency.ErrInvalidFing.. -> INTERNAL            (idempotency_fingerprint_invalid; the
+//	                                                     service derives it, so also a wiring bug)
 //	anything else                -> INTERNAL, message scrubbed
 //
 // NOT UNAUTHENTICATED for a missing tenant: that trips client credential
@@ -147,6 +151,8 @@ func Status(err error) error {
 		return withReason(codes.FailedPrecondition, "idempotency key reused with a different request", "fingerprint_mismatch")
 	case errors.Is(err, idempotency.ErrInFlight):
 		return withReason(codes.Aborted, "an identical request is in flight", "in_flight")
+	case errors.Is(err, idempotency.ErrInvalidKey):
+		return withReason(codes.InvalidArgument, "idempotency key is empty or longer than 255 characters", "idempotency_key_invalid")
 	case errors.Is(err, idempotency.ErrNotClaimed):
 		// Complete without Claim is a wiring bug in the service, not an outage.
 		// Left unmapped it reached callers as a scrubbed INTERNAL, which is
@@ -157,6 +163,8 @@ func Status(err error) error {
 		// Completing a key twice with different answers is the same kind of
 		// wiring bug: the command ran twice inside one claim.
 		return withReason(codes.Internal, "internal error", "idempotency_already_completed")
+	case errors.Is(err, idempotency.ErrInvalidFingerprint):
+		return withReason(codes.Internal, "internal error", "idempotency_fingerprint_invalid")
 	default:
 		return status.Error(codes.Internal, "internal error")
 	}

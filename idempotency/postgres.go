@@ -28,6 +28,9 @@ func (s *PostgresStore) Claim(ctx context.Context, key Key, fingerprint string) 
 	if err != nil {
 		return Record{}, false, err
 	}
+	if err := check(key, fingerprint); err != nil {
+		return Record{}, false, err
+	}
 
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO idempotency_keys (tenant_id, key, fingerprint, state, created_at)

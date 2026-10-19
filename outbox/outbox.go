@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"maps"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Ocean-Gaming/platform-go/tenant"
 )
@@ -40,6 +41,14 @@ var (
 	ErrNoID    = errors.New("outbox: message has no id")
 	ErrNoTopic = errors.New("outbox: message has no topic")
 
+	// ErrInvalidTopic means Topic is not a registry event type: PascalCase letters and digits, at
+	// most MaxLength characters. Topic carries the event type (BetSettled), never a Kafka topic;
+	// event-bus resolves the topic from the registry.
+	ErrInvalidTopic = errors.New("outbox: topic is not an event type name")
+
+	// ErrPartitionKeyTooLong means PartitionKey is over MaxLength characters.
+	ErrPartitionKeyTooLong = errors.New("outbox: partition key is longer than 255 characters")
+
 	// ErrTenantMismatch means a message names a tenant other than the one in the
 	// request's context. Writing it would announce one merchant's fact under
 	// another's id (rule 2); a producer acting for several tenants sets each
@@ -50,7 +59,12 @@ var (
 	ErrNotMarked = errors.New("outbox: not every published message was marked")
 )
 
-// Validate enforces the envelope rules every platform event must satisfy.
+// MaxLength is the longest topic and partition key accepted, in characters. migrations/0003
+// holds both columns to it.
+const MaxLength = 255
+
+// Validate enforces the envelope rules every platform event must satisfy. The topic and
+// partition-key rules are the ones migrations/0003 enforces in Postgres.
 func (m Message) Validate() error {
 	if m.ID == "" {
 		return ErrNoID
@@ -58,10 +72,31 @@ func (m Message) Validate() error {
 	if m.Topic == "" {
 		return ErrNoTopic
 	}
+	if !eventType(m.Topic) {
+		return fmt.Errorf("%w: %q", ErrInvalidTopic, m.Topic)
+	}
+	if utf8.RuneCountInString(m.PartitionKey) > MaxLength {
+		return ErrPartitionKeyTooLong
+	}
 	if !m.Tenant.Valid() {
 		return tenant.ErrMissing
 	}
 	return nil
+}
+
+// eventType reports whether s has the shape of a registry event type: an uppercase ASCII letter,
+// then ASCII letters and digits, MaxLength characters at most. Every registered type has it.
+func eventType(s string) bool {
+	if len(s) == 0 || len(s) > MaxLength || s[0] < 'A' || s[0] > 'Z' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // prepare stamps and checks a whole batch before any of it is written, so a bad

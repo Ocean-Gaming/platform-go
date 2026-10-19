@@ -130,3 +130,28 @@ support and gets no fix for the nine net/http, net/textproto and crypto/tls advi
 on 2026-10-08 (GO-2026-6603 to GO-2026-6617), fixed in go1.26.9. `golang.org/x/net` is at v0.60.0
 for the same advisories. A service taking this version has its own `go` directive raised to 1.26.0
 by `go get`, and its CI's `go-version` must follow.
+
+### v0.6.0
+
+Two migrations, and the same rules in Go so the memory and Postgres stores refuse the same values.
+Lengths are characters, not bytes, on both sides.
+
+- `0003_bounds_and_checks.sql`:
+  - idempotency keys are 1 to 255 characters (`ErrInvalidKey`, INVALID_ARGUMENT);
+  - fingerprints are lowercase hex SHA-256 (`ErrInvalidFingerprint`, INTERNAL; use `Fingerprint`);
+  - `completed_at` is set exactly when `state` is completed;
+  - outbox `topic` is a registry event type, PascalCase (`ErrInvalidTopic`). It was never a Kafka
+    topic;
+  - `partition_key` is at most 255 characters (`ErrPartitionKeyTooLong`);
+  - inbox `consumer` and `event_id` are 1 to 255 characters (`ErrInvalidConsumer`,
+    `ErrInvalidEventID`). The event id's format is still never checked (meta-repo ADR-0061).
+
+  Each check is added NOT VALID and then validated. A database whose old rows break one still
+  boots: the check refuses new bad rows at once, logs a WARNING, and validates on the first boot
+  after those rows are fixed.
+- `0004_outbox_unpublished_index_order.sql`: the relay's index becomes `(occurred_at, id) WHERE
+  published_at IS NULL`, matching its ORDER BY. It keeps the old name, so 0001's
+  `IF NOT EXISTS` stays a no-op at every boot.
+
+A service must apply every file in `platform.Migrations()`. One that copies `0001_platform.sql`
+by name gets neither these nor 0002.

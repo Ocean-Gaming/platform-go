@@ -9,10 +9,37 @@ package inbox
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/Ocean-Gaming/platform-go/tenant"
 )
+
+var (
+	// ErrInvalidEventID means the event id is empty or longer than MaxLength characters. An
+	// empty id would dedup every id-less event of a consumer into one, so the second is lost.
+	ErrInvalidEventID = errors.New("inbox: event id is empty or longer than 255 characters")
+
+	// ErrInvalidConsumer means the consumer name is empty or longer than MaxLength characters.
+	ErrInvalidConsumer = errors.New("inbox: consumer is empty or longer than 255 characters")
+)
+
+// MaxLength is the longest consumer name and event id accepted, in characters. migrations/0003
+// holds both columns to it. The id's format is never checked (meta-repo ADR-0061).
+const MaxLength = 255
+
+// check applies the rules migrations/0003 enforces in Postgres, so both stores refuse the same
+// deliveries.
+func check(consumer, eventID string) error {
+	if n := utf8.RuneCountInString(consumer); n == 0 || n > MaxLength {
+		return ErrInvalidConsumer
+	}
+	if n := utf8.RuneCountInString(eventID); n == 0 || n > MaxLength {
+		return ErrInvalidEventID
+	}
+	return nil
+}
 
 // Store records which events a consumer has handled.
 type Store interface {
@@ -57,6 +84,9 @@ func NewMemoryStore() *MemoryStore { return &MemoryStore{seen: map[string]bool{}
 func (m *MemoryStore) MarkProcessed(ctx context.Context, consumer, eventID string) (bool, error) {
 	tid, err := tenant.Require(ctx)
 	if err != nil {
+		return false, err
+	}
+	if err := check(consumer, eventID); err != nil {
 		return false, err
 	}
 	k := string(tid) + "\x00" + consumer + "\x00" + eventID

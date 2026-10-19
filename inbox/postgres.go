@@ -25,6 +25,9 @@ func (s *PostgresStore) MarkProcessed(ctx context.Context, consumer, eventID str
 	if err != nil {
 		return false, err
 	}
+	if err := check(consumer, eventID); err != nil {
+		return false, err
+	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO inbox (event_id, tenant_id, consumer, processed_at)
 		VALUES ($1, $2, $3, now())

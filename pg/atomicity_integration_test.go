@@ -23,6 +23,9 @@ func acme() context.Context {
 	return tenant.NewContext(context.Background(), "acme")
 }
 
+// fp is a well-formed fingerprint: migrations/0003 refuses any other shape.
+var fp = idempotency.Fingerprint([]byte("cmd"))
+
 func msg(id string) outbox.Message {
 	return outbox.Message{ID: id, Topic: "ActionRecorded", PartitionKey: "player-1", Payload: []byte(`{}`)}
 }
@@ -40,7 +43,7 @@ func TestRollbackLeavesNoIdempotencyRecordAndNoOutboxRow(t *testing.T) {
 		idem := idempotency.NewPostgresStore(tx)
 		ob := outbox.NewPostgresWriter(tx)
 
-		if _, replay, err := idem.Claim(ctx, "k-1", "fp"); err != nil || replay {
+		if _, replay, err := idem.Claim(ctx, "k-1", fp); err != nil || replay {
 			t.Fatalf("claim: replay=%v err=%v", replay, err)
 		}
 		if err := ob.Write(ctx, msg("11111111-1111-1111-1111-111111111111")); err != nil {
@@ -71,7 +74,7 @@ func TestCommitLeavesExactlyOneOfEach(t *testing.T) {
 	if err := pg.InTx(ctx, db, func(tx *sql.Tx) error {
 		idem := idempotency.NewPostgresStore(tx)
 		ob := outbox.NewPostgresWriter(tx)
-		if _, _, err := idem.Claim(ctx, "k-1", "fp"); err != nil {
+		if _, _, err := idem.Claim(ctx, "k-1", fp); err != nil {
 			return err
 		}
 		if err := ob.Write(ctx, msg("22222222-2222-2222-2222-222222222222")); err != nil {
@@ -104,7 +107,7 @@ func TestPanicRollsBack(t *testing.T) {
 		}()
 		_ = pg.InTx(ctx, db, func(tx *sql.Tx) error {
 			idem := idempotency.NewPostgresStore(tx)
-			if _, _, err := idem.Claim(ctx, "k-1", "fp"); err != nil {
+			if _, _, err := idem.Claim(ctx, "k-1", fp); err != nil {
 				return err
 			}
 			panic("nil map write")
@@ -272,7 +275,7 @@ func TestSameKeyDifferentTenantsBothExecute(t *testing.T) {
 		ctx := tenant.NewContext(context.Background(), tid)
 		if err := pg.InTx(ctx, db, func(tx *sql.Tx) error {
 			idem := idempotency.NewPostgresStore(tx)
-			_, replay, err := idem.Claim(ctx, "shared-key", "fp")
+			_, replay, err := idem.Claim(ctx, "shared-key", fp)
 			if err != nil {
 				return err
 			}

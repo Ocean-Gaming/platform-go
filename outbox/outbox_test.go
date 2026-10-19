@@ -3,6 +3,7 @@ package outbox_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Ocean-Gaming/platform-go/outbox"
@@ -149,5 +150,35 @@ func TestTheCallersHeadersAreNotModified(t *testing.T) {
 	got, _ := o.Unpublished(context.Background(), 1)
 	if got[0].Headers["tenant_id"] != "acme" || got[0].Headers["source"] != "test" {
 		t.Fatalf("stored headers %v; want source kept and tenant_id stamped", got[0].Headers)
+	}
+}
+
+// Topic carries the registry's event type, never a Kafka topic: event-bus resolves the topic. The
+// same rule is a CHECK on the column (migrations/0003).
+func TestATopicMustBeAnEventTypeName(t *testing.T) {
+	o := outbox.NewMemoryOutbox()
+	for _, bad := range []string{"t", "ocean.wallet.v1", "Bet-Placed", "Bet Placed", "BetPlacéd", "B" + strings.Repeat("x", 255)} {
+		if err := o.Write(ctxFor("acme"), msg("e1", bad)); !errors.Is(err, outbox.ErrInvalidTopic) {
+			t.Errorf("%q: want ErrInvalidTopic, got %v", bad, err)
+		}
+	}
+	for _, good := range []string{"BetPlaced", "T", "KycLevelChanged", "RiskFlagRaised2"} {
+		if err := o.Write(ctxFor("acme"), msg("e-"+good, good)); err != nil {
+			t.Errorf("%q: %v", good, err)
+		}
+	}
+}
+
+// A partition key is at most 255 characters, counted as characters.
+func TestAPartitionKeyIsAtMost255Characters(t *testing.T) {
+	o := outbox.NewMemoryOutbox()
+	m := msg("e1", "BetPlaced")
+	m.PartitionKey = strings.Repeat("é", 256)
+	if err := o.Write(ctxFor("acme"), m); !errors.Is(err, outbox.ErrPartitionKeyTooLong) {
+		t.Fatalf("want ErrPartitionKeyTooLong, got %v", err)
+	}
+	m.PartitionKey = strings.Repeat("é", 255)
+	if err := o.Write(ctxFor("acme"), m); err != nil {
+		t.Fatalf("a 255-character partition key was refused: %v", err)
 	}
 }

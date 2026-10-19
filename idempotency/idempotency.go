@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Ocean-Gaming/platform-go/tenant"
 )
@@ -62,7 +63,45 @@ var (
 	// a DIFFERENT response. The first answer stands: overwriting it would make a
 	// later replay return something other than what the first caller was told.
 	ErrAlreadyCompleted = errors.New("idempotency: key already completed with a different response")
+
+	// ErrInvalidKey means the key is empty or longer than MaxKeyLength characters. The caller
+	// chose it, so this is the caller's error, not the service's.
+	ErrInvalidKey = errors.New("idempotency: key is empty or longer than 255 characters")
+
+	// ErrInvalidFingerprint means the fingerprint is not a lowercase hex SHA-256. The service
+	// derives it, normally with Fingerprint, so this is a wiring bug: a fingerprint of another
+	// shape weakens the "same key, different request" check without anything noticing.
+	ErrInvalidFingerprint = errors.New("idempotency: fingerprint is not a lowercase hex SHA-256")
 )
+
+// MaxKeyLength is the longest key accepted, in characters. migrations/0003 holds the column to it.
+const MaxKeyLength = 255
+
+// ValidFingerprint reports whether fp has the shape Fingerprint produces: exactly 64 characters
+// of lowercase hex.
+func ValidFingerprint(fp string) bool {
+	if len(fp) != sha256.Size*2 {
+		return false
+	}
+	for i := 0; i < len(fp); i++ {
+		if c := fp[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// check applies the rules migrations/0003 enforces in Postgres, so both stores refuse the same
+// claims. It runs after the tenant check, so a claim with no tenant is still ErrMissing.
+func check(key Key, fingerprint string) error {
+	if n := utf8.RuneCountInString(string(key)); n == 0 || n > MaxKeyLength {
+		return ErrInvalidKey
+	}
+	if !ValidFingerprint(fingerprint) {
+		return ErrInvalidFingerprint
+	}
+	return nil
+}
 
 // Fingerprint derives a stable digest of a request body, so the same key with a
 // different body can be detected.
@@ -78,7 +117,9 @@ func Fingerprint(b []byte) string {
 type Store interface {
 	// Claim reserves key for this request. It returns replay=true together with
 	// the stored record when the key has already completed, in which case the
-	// caller must return the stored response and do no work.
+	// caller must return the stored response and do no work. A key that is empty
+	// or over MaxKeyLength characters is ErrInvalidKey; a fingerprint that is not
+	// a lowercase hex SHA-256 is ErrInvalidFingerprint.
 	Claim(ctx context.Context, key Key, fingerprint string) (rec Record, replay bool, err error)
 
 	// Complete stores the response for a previously claimed key. Only an
