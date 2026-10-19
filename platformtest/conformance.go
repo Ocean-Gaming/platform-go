@@ -13,6 +13,7 @@ package platformtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/Ocean-Gaming/platform-go/idempotency"
@@ -128,6 +129,53 @@ func idempotencyConformance(t *testing.T, h Harness) {
 			}); err != nil {
 				t.Fatalf("tenant %s: %v", tid, err)
 			}
+		}
+	})
+
+	// The first answer stands. A second Complete that overwrote it made every
+	// later replay return something the first caller was never told.
+	t.Run("a completed key keeps its first response", func(t *testing.T) {
+		ctx := ctxFor(acme)
+		if err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+			if _, _, err := idem.Claim(ctx, "k-complete", fp); err != nil {
+				return err
+			}
+			return idem.Complete(ctx, "k-complete", stored)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+			return idem.Complete(ctx, "k-complete", append([]byte(nil), stored...))
+		}); err != nil {
+			t.Fatalf("completing again with the same response must succeed, got %v", err)
+		}
+		err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+			return idem.Complete(ctx, "k-complete", []byte(`{"action_id":"a-2"}`))
+		})
+		if !errors.Is(err, idempotency.ErrAlreadyCompleted) {
+			t.Fatalf("completing with a different response: want ErrAlreadyCompleted, got %v", err)
+		}
+		if err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+			rec, replay, err := idem.Claim(ctx, "k-complete", fp)
+			if err != nil {
+				return err
+			}
+			if !replay || string(rec.Response) != string(stored) {
+				t.Fatalf("replay=%v response=%q; want the first response %q", replay, rec.Response, stored)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("completing an unknown key is ErrNotClaimed", func(t *testing.T) {
+		ctx := ctxFor(acme)
+		err := h.Do(ctx, func(idem idempotency.Store, _ inbox.Store) error {
+			return idem.Complete(ctx, "k-never-claimed", stored)
+		})
+		if !errors.Is(err, idempotency.ErrNotClaimed) {
+			t.Fatalf("want ErrNotClaimed, got %v", err)
 		}
 	})
 

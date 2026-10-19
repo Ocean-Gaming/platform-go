@@ -1,6 +1,7 @@
 package idempotency
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"time"
@@ -73,6 +74,12 @@ func (s *MemoryStore) Complete(ctx context.Context, key Key, response []byte) er
 	rec, ok := byTenant[key]
 	if !ok {
 		return ErrNotClaimed
+	}
+	if rec.State == StateCompleted {
+		if bytes.Equal(rec.Response, response) {
+			return nil
+		}
+		return ErrAlreadyCompleted
 	}
 	rec.State = StateCompleted
 	rec.Response = append([]byte(nil), response...)

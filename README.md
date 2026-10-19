@@ -100,3 +100,25 @@ tests, so parallel packages would wipe each other mid-test.
 Semver, tagged. Services pin their own version and upgrade when they choose — the module
 makes a coordinated fix *possible*, never mandatory. A change to `grpcx`'s error mapping
 or to `migrations/` is a **minor at minimum**, and a breaking wire change is a major.
+
+### v0.5.0
+
+Breaking for a caller that wired a store on the pool, which was already a bug:
+`idempotency.NewPostgresStore`, `inbox.NewPostgresStore` and `outbox.NewPostgresWriter` take a
+`*sql.Tx`. Every service checked out on 2026-10-19 already passes one and builds unchanged.
+Behaviour that a service may notice on upgrade:
+
+- `Complete` moves only `in_flight` to `completed`. The same response again succeeds; a different
+  one is `ErrAlreadyCompleted` (INTERNAL, reason `idempotency_already_completed`).
+- The outbox refuses a message whose tenant differs from the context's (`ErrTenantMismatch`),
+  checks the whole batch before writing any of it, and no longer writes into the caller's
+  `Headers` map. The memory outbox now stamps the `tenant_id` header too.
+- The relay drains full batches back to back, bounds each tick with `TickTimeout` (default
+  30 s), ticks once at start, and treats a mark that matched fewer rows than it published as a
+  failure (`ErrNotMarked`).
+- `grpcx.Status` maps `context.Canceled` and `context.DeadlineExceeded`, wrapped or not, to
+  CANCELED and DEADLINE_EXCEEDED instead of INTERNAL.
+- `gate.FailClosed` denies a request that has already ended without running the checker, and
+  denies an Allow that arrives after cancellation.
+- A staff token needs `iat`, and `exp - iat` may not exceed `MaxLifetime` (default one minute,
+  operations-service's TTL).

@@ -45,6 +45,9 @@ import (
 // Issuer is operations-service's token issuer.
 const Issuer = "operations-service"
 
+// DefaultMaxLifetime is the one-minute contract operations-service mints to (its mint.TTL).
+const DefaultMaxLifetime = time.Minute
+
 // ErrInvalid is every reason a token is not accepted, deliberately undifferentiated on the wire.
 var ErrInvalid = errors.New("stafftoken: token not accepted")
 
@@ -55,8 +58,12 @@ type Config struct {
 	Audience string        // this service's name, which operations-service mints for
 	Refresh  time.Duration // how long a fetched key set is trusted before it is fetched again; default 5 min
 	Leeway   time.Duration // clock skew allowed on exp, nbf and iat; default 30 s
-	Client   *http.Client
-	Now      func() time.Time
+	// MaxLifetime is the longest exp - iat accepted; default DefaultMaxLifetime, the minute
+	// operations-service mints for. It is compared exactly, without Leeway: skew moves both claims
+	// together and does not lengthen a token.
+	MaxLifetime time.Duration
+	Client      *http.Client
+	Now         func() time.Time
 }
 
 // FromEnv reads STAFF_TOKEN_JWKS_URL and STAFF_TOKEN_ISSUER for a service named audience.
@@ -90,6 +97,9 @@ func New(c Config) (*Verifier, error) {
 	}
 	if c.Leeway <= 0 {
 		c.Leeway = 30 * time.Second
+	}
+	if c.MaxLifetime <= 0 {
+		c.MaxLifetime = DefaultMaxLifetime
 	}
 	if c.Client == nil {
 		c.Client = &http.Client{Timeout: 5 * time.Second}
@@ -158,9 +168,17 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 		return Claims{}, fmt.Errorf("%w: not for %s", ErrInvalid, v.c.Audience)
 	case c.Exp == 0 || now.After(time.Unix(c.Exp, 0).Add(v.c.Leeway)):
 		return Claims{}, fmt.Errorf("%w: expired", ErrInvalid)
+	// Without iat a token's lifetime is whatever its exp says: one minted with a far exp by a bug
+	// stays good until then, and so does every copy of it that leaks into a log. The one-minute
+	// contract is only a contract if it is checked.
+	case c.Iat == 0:
+		return Claims{}, fmt.Errorf("%w: no iat", ErrInvalid)
+	// In seconds, not as a Duration: a huge exp would overflow the multiplication and wrap.
+	case c.Exp < c.Iat || c.Exp-c.Iat > int64(v.c.MaxLifetime/time.Second):
+		return Claims{}, fmt.Errorf("%w: lifetime %ds exceeds %s", ErrInvalid, c.Exp-c.Iat, v.c.MaxLifetime)
 	case c.Nbf != 0 && now.Add(v.c.Leeway).Before(time.Unix(c.Nbf, 0)):
 		return Claims{}, fmt.Errorf("%w: not yet valid", ErrInvalid)
-	case c.Iat != 0 && now.Add(v.c.Leeway).Before(time.Unix(c.Iat, 0)):
+	case now.Add(v.c.Leeway).Before(time.Unix(c.Iat, 0)):
 		return Claims{}, fmt.Errorf("%w: issued in the future", ErrInvalid)
 	case !strings.HasPrefix(c.Sub, "staff:") || c.Tid == "":
 		return Claims{}, fmt.Errorf("%w: no staff subject or tenant", ErrInvalid)

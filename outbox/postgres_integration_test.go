@@ -5,6 +5,7 @@ package outbox_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -80,5 +81,48 @@ func TestRelayRoundTripOverRealSQL(t *testing.T) {
 	}
 	if err := r.MarkPublished(ctx, nil); err != nil {
 		t.Fatalf("marking an empty batch failed: %v", err)
+	}
+
+	// A mark that misses a row is an error: the relay follows a full batch at
+	// once, and a silent miss would republish the same rows in a loop.
+	err = r.MarkPublished(ctx, []string{msgs[2].ID, "99999999-9999-4999-8999-999999999999"})
+	if !errors.Is(err, outbox.ErrNotMarked) {
+		t.Fatalf("marking an id with no row: want ErrNotMarked, got %v", err)
+	}
+}
+
+// The same three rules as the memory outbox, against real SQL: another
+// tenant's message is refused, a bad batch inserts nothing even when the
+// caller commits anyway, and the caller's headers are left alone.
+func TestPostgresWriterChecksTheWholeBatchFirst(t *testing.T) {
+	db := pgtest.Open(t)
+	ctx := tenant.NewContext(context.Background(), "acme")
+	good := outbox.Message{ID: "44444444-4444-4444-8444-444444444444", Topic: "ActionRecorded", PartitionKey: "p", Payload: []byte(`{}`)}
+
+	other := good
+	other.Tenant = "globex"
+	shared := map[string]string{"source": "test"}
+	good.Headers = shared
+
+	var mismatch, batch error
+	if err := pg.InTx(ctx, db, func(tx *sql.Tx) error {
+		w := outbox.NewPostgresWriter(tx)
+		mismatch = w.Write(ctx, other)
+		batch = w.Write(ctx, good, outbox.Message{ID: "55555555-5555-4555-8555-555555555555"})
+		return nil // commit regardless: nothing may have been inserted
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(mismatch, outbox.ErrTenantMismatch) {
+		t.Fatalf("want ErrTenantMismatch, got %v", mismatch)
+	}
+	if !errors.Is(batch, outbox.ErrNoTopic) {
+		t.Fatalf("want ErrNoTopic, got %v", batch)
+	}
+	if n := pgtest.Count(t, db, "outbox"); n != 0 {
+		t.Fatalf("%d rows inserted from refused writes", n)
+	}
+	if _, ok := shared["tenant_id"]; ok {
+		t.Fatalf("the caller's headers were modified: %v", shared)
 	}
 }

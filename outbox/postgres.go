@@ -4,43 +4,30 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
-	"github.com/Ocean-Gaming/platform-go/pg"
 	"github.com/Ocean-Gaming/platform-go/tenant"
 )
 
 // PostgresWriter appends outbox rows using the caller's transaction.
 //
-// Construct it with the same *sql.Tx as the state change. That is the entire
-// point: the row and the change commit together or not at all.
-type PostgresWriter struct{ db pg.DBTX }
+// It takes the same *sql.Tx as the state change, and only a transaction. That
+// is the entire point: the row and the change commit together or not at all.
+// A pg.DBTX let the pool in too, and an event written on the pool commits
+// whether or not the change it announces does.
+type PostgresWriter struct{ db *sql.Tx }
 
-func NewPostgresWriter(db pg.DBTX) *PostgresWriter { return &PostgresWriter{db: db} }
+func NewPostgresWriter(tx *sql.Tx) *PostgresWriter { return &PostgresWriter{db: tx} }
 
 func (w *PostgresWriter) Write(ctx context.Context, msgs ...Message) error {
-	tid, err := tenant.Require(ctx)
+	msgs, err := prepare(ctx, time.Now, msgs)
 	if err != nil {
 		return err
 	}
 	for _, m := range msgs {
-		if m.Tenant == "" {
-			m.Tenant = tid
-		}
-		if m.OccurredAt.IsZero() {
-			m.OccurredAt = time.Now()
-		}
-		if err := m.Validate(); err != nil {
-			return err
-		}
-		headers := m.Headers
-		if headers == nil {
-			headers = map[string]string{}
-		}
-		// Rule 2 - tenant_id travels in the event header, not only the payload.
-		headers["tenant_id"] = string(m.Tenant)
-		hj, err := json.Marshal(headers)
+		hj, err := json.Marshal(m.Headers)
 		if err != nil {
 			return err
 		}
@@ -101,9 +88,21 @@ func (r *PostgresReader) MarkPublished(ctx context.Context, ids []string) error 
 	}
 	// One statement, not one per id: the relay's default batch is 100, so a
 	// loop here is 100 round trips per tick on the hot path, in every service.
-	_, err := r.db.ExecContext(ctx,
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE outbox SET published_at = now() WHERE id = ANY($1)`, pq(ids))
-	return err
+	if err != nil {
+		return err
+	}
+	// Already-published rows match too, so a re-mark after a crash still counts
+	// every id. Fewer means rows the relay just published are not there to mark.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if int(n) != len(ids) {
+		return fmt.Errorf("%w: %d of %d", ErrNotMarked, n, len(ids))
+	}
+	return nil
 }
 
 // pq renders a string slice as a Postgres array literal. The driver handles

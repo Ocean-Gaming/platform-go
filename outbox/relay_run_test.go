@@ -3,6 +3,7 @@ package outbox_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -151,5 +152,165 @@ func TestASuccessfulPublishIsVisibleAtDebug(t *testing.T) {
 	a, _ := cap.find("outbox relay published")
 	if a["count"].Int64() != 1 {
 		t.Errorf("count = %v, want 1", a["count"])
+	}
+}
+
+// countingPublisher records each batch and can block until its context ends.
+type countingPublisher struct {
+	mu      sync.Mutex
+	batches []int
+	block   bool
+	after   func() // runs after each successful publish
+}
+
+func (p *countingPublisher) Publish(ctx context.Context, msgs []outbox.Message) error {
+	if p.block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	p.mu.Lock()
+	p.batches = append(p.batches, len(msgs))
+	p.mu.Unlock()
+	if p.after != nil {
+		p.after()
+	}
+	return nil
+}
+
+func (p *countingPublisher) total() (batches, msgs int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, n := range p.batches {
+		msgs += n
+	}
+	return len(p.batches), msgs
+}
+
+func backlog(t *testing.T, n int) *outbox.MemoryOutbox {
+	t.Helper()
+	store := outbox.NewMemoryOutbox()
+	for i := 0; i < n; i++ {
+		if err := store.Write(ctxFor("acme"), msg(fmt.Sprintf("e-%03d", i), "BetPlaced")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return store
+}
+
+// A full batch is followed at once by the next one. Waiting an Interval after
+// every batch capped a service at Batch/Interval events a second however large
+// its backlog was.
+func TestAFullBatchIsFollowedAtOnceByTheNext(t *testing.T) {
+	store := backlog(t, 25)
+	pub := &countingPublisher{}
+	relay := &outbox.Relay{Reader: store, Publisher: pub, Batch: 10, Interval: time.Hour, Log: slog.New(&capture{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go relay.Run(ctx) //nolint:errcheck // returns ctx.Err() on cancel
+
+	// An Interval of an hour: all 25 inside the test's two seconds means no
+	// wait between the three batches.
+	waitFor(t, "the whole backlog to drain", func() bool {
+		_, n := pub.total()
+		return n == 25
+	})
+	if b, _ := pub.total(); b != 3 {
+		t.Fatalf("%d batches for 25 messages at 10 a batch; want 3", b)
+	}
+}
+
+// A short batch means the backlog is drained, and the relay waits.
+func TestAShortBatchWaitsForTheInterval(t *testing.T) {
+	store := backlog(t, 3)
+	pub := &countingPublisher{}
+	relay := &outbox.Relay{Reader: store, Publisher: pub, Batch: 10, Interval: time.Hour, Log: slog.New(&capture{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go relay.Run(ctx) //nolint:errcheck // returns ctx.Err() on cancel
+
+	waitFor(t, "the first batch", func() bool { b, _ := pub.total(); return b == 1 })
+	if err := store.Write(ctxFor("acme"), msg("e-late", "BetPlaced")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if b, _ := pub.total(); b != 1 {
+		t.Fatalf("%d batches; after a short batch the relay must wait its Interval", b)
+	}
+}
+
+// A publish that never returns fails the tick at TickTimeout instead of
+// stalling the relay, silently, for good.
+func TestAHungPublishFailsTheTick(t *testing.T) {
+	store := backlog(t, 1)
+	relay := &outbox.Relay{Reader: store, Publisher: &countingPublisher{block: true}, Batch: 10, TickTimeout: 20 * time.Millisecond}
+
+	done := make(chan error, 1)
+	go func() { _, err := relay.Tick(context.Background()); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("want a deadline error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Tick did not return: TickTimeout does not cover the publish")
+	}
+	if left, _ := store.Unpublished(context.Background(), 10); len(left) != 1 {
+		t.Fatalf("%d unpublished after a timed-out publish; the row must stay for the next tick", len(left))
+	}
+}
+
+// Cancellation is honoured between batches, so shutdown does not wait for a
+// backlog to drain.
+func TestCancellationStopsTheDrainBetweenBatches(t *testing.T) {
+	store := backlog(t, 50)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pub := &countingPublisher{after: cancel}
+	relay := &outbox.Relay{Reader: store, Publisher: pub, Batch: 10, Interval: time.Hour, Log: slog.New(&capture{})}
+
+	if err := relay.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+	if b, _ := pub.total(); b != 1 {
+		t.Fatalf("%d batches published after cancellation during the first; want 1", b)
+	}
+}
+
+// stuckReader always has a full batch and can never mark it.
+type stuckReader struct {
+	mu    sync.Mutex
+	reads int
+}
+
+func (r *stuckReader) Unpublished(_ context.Context, limit int) ([]outbox.Message, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reads++
+	out := make([]outbox.Message, limit)
+	for i := range out {
+		out[i] = msg(fmt.Sprintf("e-%d", i), "BetPlaced")
+	}
+	return out, nil
+}
+
+func (r *stuckReader) MarkPublished(context.Context, []string) error { return outbox.ErrNotMarked }
+
+func (r *stuckReader) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
+}
+
+// A full batch that cannot be marked is a failure, and the relay pauses on it.
+// Following it at once would republish the same rows as fast as the broker took
+// them.
+func TestAFullBatchThatIsNotMarkedIsNotABusyLoop(t *testing.T) {
+	reader := &stuckReader{}
+	relay := &outbox.Relay{Reader: reader, Publisher: &countingPublisher{}, Batch: 10, Interval: 20 * time.Millisecond, Log: slog.New(&capture{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = relay.Run(ctx)
+	if n := reader.count(); n > 10 {
+		t.Fatalf("%d reads in 100 ms at a 20 ms Interval; the relay looped on a batch it could not mark", n)
 	}
 }

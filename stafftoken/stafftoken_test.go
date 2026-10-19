@@ -123,6 +123,12 @@ func TestAStaffCommandNeedsOperationsServicesTokenForThisServiceTenantAndStaffMe
 		{"another staff member", "acme", ops.sign(t, claims("staff:idn-2", "acme", "player-accounts")), staffCmd, codes.PermissionDenied},
 		{"expired", "acme", ops.sign(t, map[string]any{"iss": "operations-service", "sub": "staff:idn-1", "aud": "player-accounts",
 			"tid": "acme", "exp": time.Now().Add(-time.Hour).Unix()}), staffCmd, codes.Unauthenticated},
+		{"no iat", "acme", ops.sign(t, map[string]any{"iss": "operations-service", "sub": "staff:idn-1", "aud": "player-accounts",
+			"tid": "acme", "exp": time.Now().Add(30 * time.Second).Unix()}), staffCmd, codes.Unauthenticated},
+		{"a lifetime over the minute", "acme", ops.sign(t, map[string]any{"iss": "operations-service", "sub": "staff:idn-1", "aud": "player-accounts",
+			"tid": "acme", "iat": time.Now().Unix(), "exp": time.Now().Add(2 * time.Minute).Unix()}), staffCmd, codes.Unauthenticated},
+		{"an old iat with a far exp", "acme", ops.sign(t, map[string]any{"iss": "operations-service", "sub": "staff:idn-1", "aud": "player-accounts",
+			"tid": "acme", "iat": time.Now().Add(-10 * time.Minute).Unix(), "exp": time.Now().Add(30 * time.Second).Unix()}), staffCmd, codes.Unauthenticated},
 		{"the attribution in another field", "acme", "", command(t, "", "staff:idn-1"), codes.Unauthenticated},
 	}
 	for _, c := range cases {

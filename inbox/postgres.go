@@ -2,16 +2,18 @@ package inbox
 
 import (
 	"context"
+	"database/sql"
 
-	"github.com/Ocean-Gaming/platform-go/pg"
 	"github.com/Ocean-Gaming/platform-go/tenant"
 )
 
 // PostgresStore records handled events using the caller's transaction, so the
-// dedup row and the handler's own writes commit together.
-type PostgresStore struct{ db pg.DBTX }
+// dedup row and the handler's own writes commit together. It takes a *sql.Tx
+// and nothing else: on the pool the dedup row commits on its own, and a handler
+// that then fails has its event marked handled and never retried.
+type PostgresStore struct{ db *sql.Tx }
 
-func NewPostgresStore(db pg.DBTX) *PostgresStore { return &PostgresStore{db: db} }
+func NewPostgresStore(tx *sql.Tx) *PostgresStore { return &PostgresStore{db: tx} }
 
 // MarkProcessed is a single INSERT ... ON CONFLICT DO NOTHING.
 //

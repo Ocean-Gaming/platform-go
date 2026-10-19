@@ -3,6 +3,8 @@ package idempotency_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/Ocean-Gaming/platform-go/idempotency"
@@ -92,5 +94,50 @@ func TestClaimRequiresTenant(t *testing.T) {
 	s := idempotency.NewMemoryStore()
 	if _, _, err := s.Claim(context.Background(), "k", "fp"); !errors.Is(err, tenant.ErrMissing) {
 		t.Fatalf("want ErrMissing, got %v", err)
+	}
+}
+
+// Racing Completes of one key: exactly one response is stored, every other
+// caller is told so, and the stored answer is the winner's.
+func TestConcurrentCompletesKeepExactlyOneResponse(t *testing.T) {
+	s := idempotency.NewMemoryStore()
+	ctx := ctxFor("acme")
+	if _, _, err := s.Claim(ctx, "k1", idempotency.Fingerprint([]byte("A"))); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 16
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.Complete(ctx, "k1", []byte(fmt.Sprintf(`{"n":%d}`, i)))
+		}(i)
+	}
+	wg.Wait()
+
+	winner := -1
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			if winner != -1 {
+				t.Fatalf("workers %d and %d both completed the key", winner, i)
+			}
+			winner = i
+		case !errors.Is(err, idempotency.ErrAlreadyCompleted):
+			t.Fatalf("worker %d: want ErrAlreadyCompleted, got %v", i, err)
+		}
+	}
+	if winner == -1 {
+		t.Fatal("no Complete succeeded")
+	}
+	rec, replay, err := s.Claim(ctx, "k1", idempotency.Fingerprint([]byte("A")))
+	if err != nil || !replay {
+		t.Fatalf("replay=%v err=%v", replay, err)
+	}
+	if want := fmt.Sprintf(`{"n":%d}`, winner); string(rec.Response) != want {
+		t.Fatalf("stored %q, want the winner's %q", rec.Response, want)
 	}
 }

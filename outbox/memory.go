@@ -5,8 +5,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/Ocean-Gaming/platform-go/tenant"
 )
 
 // MemoryOutbox is an in-process Writer + Reader for unit tests.
@@ -22,24 +20,13 @@ func NewMemoryOutbox() *MemoryOutbox {
 }
 
 func (o *MemoryOutbox) Write(ctx context.Context, msgs ...Message) error {
-	tid, err := tenant.Require(ctx)
+	msgs, err := prepare(ctx, o.now, msgs)
 	if err != nil {
 		return err
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	for _, m := range msgs {
-		if m.Tenant == "" {
-			m.Tenant = tid
-		}
-		if m.OccurredAt.IsZero() {
-			m.OccurredAt = o.now()
-		}
-		if err := m.Validate(); err != nil {
-			return err
-		}
-		o.msgs = append(o.msgs, m)
-	}
+	o.msgs = append(o.msgs, msgs...)
 	return nil
 }
 
@@ -52,7 +39,13 @@ func (o *MemoryOutbox) Unpublished(ctx context.Context, limit int) ([]Message, e
 			out = append(out, m)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].OccurredAt.Before(out[j].OccurredAt) })
+	// The Postgres reader's order: occurred_at, then id.
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].OccurredAt.Equal(out[j].OccurredAt) {
+			return out[i].OccurredAt.Before(out[j].OccurredAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}

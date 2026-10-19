@@ -104,3 +104,50 @@ func TestTenantIsStampedFromContext(t *testing.T) {
 		t.Fatalf("tenant not stamped on event header, got %q", got[0].Tenant)
 	}
 }
+
+// Rule 2: a message may not name a tenant other than the request's. Writing it
+// would announce one merchant's fact under another's id.
+func TestAMessageForAnotherTenantIsRefused(t *testing.T) {
+	o := outbox.NewMemoryOutbox()
+	m := msg("e1", "BetPlaced")
+	m.Tenant = "globex"
+	if err := o.Write(ctxFor("acme"), m); !errors.Is(err, outbox.ErrTenantMismatch) {
+		t.Fatalf("want ErrTenantMismatch, got %v", err)
+	}
+	m.Tenant = "acme"
+	if err := o.Write(ctxFor("acme"), m); err != nil {
+		t.Fatalf("a message naming the request's own tenant was refused: %v", err)
+	}
+}
+
+// The whole batch is checked before any of it is written: a bad message
+// part-way through leaves nothing behind.
+func TestABatchWithOneBadMessageWritesNothing(t *testing.T) {
+	o := outbox.NewMemoryOutbox()
+	if err := o.Write(ctxFor("acme"), msg("e1", "BetPlaced"), outbox.Message{ID: "e2"}); !errors.Is(err, outbox.ErrNoTopic) {
+		t.Fatalf("want ErrNoTopic, got %v", err)
+	}
+	if n := o.Len(); n != 0 {
+		t.Fatalf("%d messages written from a batch that was refused", n)
+	}
+}
+
+// The tenant header is stamped on a copy. Writing into the caller's map leaked
+// the last tenant into every other message sharing it, and raced when the map
+// was shared across goroutines.
+func TestTheCallersHeadersAreNotModified(t *testing.T) {
+	o := outbox.NewMemoryOutbox()
+	shared := map[string]string{"source": "test"}
+	m := msg("e1", "BetPlaced")
+	m.Headers = shared
+	if err := o.Write(ctxFor("acme"), m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := shared["tenant_id"]; ok || len(shared) != 1 {
+		t.Fatalf("the caller's headers were modified: %v", shared)
+	}
+	got, _ := o.Unpublished(context.Background(), 1)
+	if got[0].Headers["tenant_id"] != "acme" || got[0].Headers["source"] != "test" {
+		t.Fatalf("stored headers %v; want source kept and tenant_id stamped", got[0].Headers)
+	}
+}

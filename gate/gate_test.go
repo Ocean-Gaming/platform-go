@@ -71,3 +71,47 @@ func TestExplicitDenyKeepsItsReason(t *testing.T) {
 		t.Fatalf("reason lost: %+v", d)
 	}
 }
+
+// A request that has already ended is not asked about: the checker never runs,
+// so a register call is not made on behalf of a caller who has gone.
+func TestAnEndedRequestDeniesWithoutRunningTheChecker(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel2()
+
+	for name, c := range map[string]struct {
+		ctx    context.Context
+		reason string
+	}{
+		"cancelled": {cancelled, "gate cancelled"},
+		"expired":   {expired, "gate timed out"},
+	} {
+		ran := false
+		d := gate.FailClosed(c.ctx, time.Second, gate.CheckerFunc(func(context.Context) (gate.Decision, error) {
+			ran = true
+			return gate.Allow(), nil
+		}))
+		if d.Allowed || d.Reason != c.reason {
+			t.Errorf("%s: %+v, want denied with %q", name, d, c.reason)
+		}
+		if ran {
+			t.Errorf("%s: the checker ran for a request that had already ended", name)
+		}
+	}
+}
+
+// An Allow that arrives after the request was cancelled is denied. Without the
+// check, select picked between the answer and the cancellation at random.
+func TestAnAllowAfterCancellationIsDenied(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		d := gate.FailClosed(ctx, time.Second, gate.CheckerFunc(func(context.Context) (gate.Decision, error) {
+			cancel() // the caller goes away while the checker, ignoring ctx, says yes
+			return gate.Allow(), nil
+		}))
+		if d.Allowed {
+			t.Fatalf("run %d: an Allow returned after cancellation was accepted", i)
+		}
+	}
+}

@@ -3,9 +3,11 @@
 package pg_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -116,57 +118,98 @@ func TestPanicRollsBack(t *testing.T) {
 
 // Rule 3 under real concurrency: of N simultaneous commands sharing one key,
 // exactly one may execute. The rest must be rejected or replay - never execute.
+//
+// Every worker's outcome is recorded, including the commit. Discarding them
+// counted a database error as a rejection, so a run in which every claim failed
+// with 22P02 or a dropped connection passed as "dedup worked".
 func TestConcurrentSameKeyExecutesExactlyOnce(t *testing.T) {
 	db := pgtest.Open(t)
 	ctx := acme()
 	const n = 16
+	stored := []byte(`{"action_id":"a-1"}`)
 
-	var (
-		mu       sync.Mutex
-		executed int
-		rejected int
-	)
+	type outcome struct {
+		executed bool
+		replayed []byte // the replayed response, when the claim replayed
+		conflict bool   // ErrInFlight: the expected, retryable refusal
+		err      error  // anything else, the commit included
+	}
+	outcomes := make([]outcome, n)
+
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_ = pg.InTx(ctx, db, func(tx *sql.Tx) error {
+			o := &outcomes[i]
+			err := pg.InTx(ctx, db, func(tx *sql.Tx) error {
 				idem := idempotency.NewPostgresStore(tx)
-				ob := outbox.NewPostgresWriter(tx)
-				_, replay, err := idem.Claim(ctx, "shared-key", "fp")
-				if err != nil || replay {
-					mu.Lock()
-					rejected++
-					mu.Unlock()
+				rec, replay, err := idem.Claim(ctx, "shared-key", idempotency.Fingerprint([]byte("cmd")))
+				switch {
+				case errors.Is(err, idempotency.ErrInFlight):
+					o.conflict = true
+					return nil
+				case err != nil:
+					return err
+				case replay:
+					o.replayed = rec.Response
+					return nil
+				}
+				if err := outbox.NewPostgresWriter(tx).Write(ctx, msg(fmt.Sprintf("aaaaaaaa-0000-4000-8000-%012d", i))); err != nil {
 					return err
 				}
-				id := [...]string{
-					"aaaaaaaa-0000-0000-0000-00000000000" + string(rune('0'+i%10)),
-				}[0]
-				if err := ob.Write(ctx, msg(id)); err != nil {
+				if err := idem.Complete(ctx, "shared-key", stored); err != nil {
 					return err
 				}
-				if err := idem.Complete(ctx, "shared-key", []byte(`{}`)); err != nil {
-					return err
-				}
-				mu.Lock()
-				executed++
-				mu.Unlock()
+				o.executed = true
 				return nil
 			})
+			if err != nil {
+				// A failed commit means the work did not happen, whatever fn reported.
+				o.executed = false
+				o.err = err
+			}
 		}(i)
 	}
 	wg.Wait()
 
+	var executed, replayed, conflicts int
+	for i, o := range outcomes {
+		switch {
+		case o.err != nil:
+			t.Errorf("worker %d: %v (a database error is not a dedup)", i, o.err)
+		case o.executed:
+			executed++
+		case o.replayed != nil:
+			replayed++
+			if !bytes.Equal(o.replayed, stored) {
+				t.Errorf("worker %d replayed %q, want %q", i, o.replayed, stored)
+			}
+		case o.conflict:
+			conflicts++
+		default:
+			t.Errorf("worker %d neither executed, replayed nor conflicted", i)
+		}
+	}
 	if executed != 1 {
 		t.Fatalf("%d of %d concurrent commands executed; exactly 1 may", executed, n)
 	}
+	if replayed+conflicts != n-1 {
+		t.Fatalf("replayed=%d conflicts=%d, want %d between them", replayed, conflicts, n-1)
+	}
+
+	// The business effect, counted after every commit.
 	if got := pgtest.Count(t, db, "outbox"); got != 1 {
 		t.Fatalf("outbox has %d rows; a duplicate event is a duplicated bet", got)
 	}
-	if rejected != n-1 {
-		t.Fatalf("rejected=%d want %d", rejected, n-1)
+	var state string
+	var response []byte
+	if err := db.QueryRow(`SELECT state, response FROM idempotency_keys WHERE tenant_id = 'acme' AND key = 'shared-key'`).
+		Scan(&state, &response); err != nil {
+		t.Fatal(err)
+	}
+	if state != "completed" || !bytes.Equal(response, stored) {
+		t.Fatalf("key is %s with %q; want completed with %q", state, response, stored)
 	}
 }
 
@@ -288,5 +331,56 @@ func TestSameEventIdDifferentTenantsBothRun(t *testing.T) {
 	}
 	if runs != 2 {
 		t.Fatalf("redelivery to the same tenant re-ran the handler: %d runs", runs)
+	}
+}
+
+// Racing Completes of one committed in-flight key, each in its own transaction.
+// They serialise on the row lock; the one that waits must find the key already
+// completed and refuse, not overwrite the answer the first caller was given.
+func TestConcurrentCompletesKeepTheFirstResponse(t *testing.T) {
+	db := pgtest.Open(t)
+	ctx := acme()
+	if err := pg.InTx(ctx, db, func(tx *sql.Tx) error {
+		_, _, err := idempotency.NewPostgresStore(tx).Claim(ctx, "k-race", idempotency.Fingerprint([]byte("cmd")))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 8
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = pg.InTx(ctx, db, func(tx *sql.Tx) error {
+				return idempotency.NewPostgresStore(tx).Complete(ctx, "k-race", []byte(fmt.Sprintf(`{"n":%d}`, i)))
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	winner := -1
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			if winner != -1 {
+				t.Fatalf("workers %d and %d both completed the key", winner, i)
+			}
+			winner = i
+		case !errors.Is(err, idempotency.ErrAlreadyCompleted):
+			t.Fatalf("worker %d: want ErrAlreadyCompleted, got %v", i, err)
+		}
+	}
+	if winner == -1 {
+		t.Fatal("no Complete succeeded")
+	}
+	var response []byte
+	if err := db.QueryRow(`SELECT response FROM idempotency_keys WHERE tenant_id = 'acme' AND key = 'k-race'`).Scan(&response); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf(`{"n":%d}`, winner); string(response) != want {
+		t.Fatalf("stored %q, want the winner's %q", response, want)
 	}
 }

@@ -57,6 +57,11 @@ var (
 
 	// ErrNotClaimed means Complete was called for a key that was never claimed.
 	ErrNotClaimed = errors.New("idempotency: key was not claimed")
+
+	// ErrAlreadyCompleted means Complete was called for a key that already holds
+	// a DIFFERENT response. The first answer stands: overwriting it would make a
+	// later replay return something other than what the first caller was told.
+	ErrAlreadyCompleted = errors.New("idempotency: key already completed with a different response")
 )
 
 // Fingerprint derives a stable digest of a request body, so the same key with a
@@ -76,6 +81,10 @@ type Store interface {
 	// caller must return the stored response and do no work.
 	Claim(ctx context.Context, key Key, fingerprint string) (rec Record, replay bool, err error)
 
-	// Complete stores the response for a previously claimed key.
+	// Complete stores the response for a previously claimed key. Only an
+	// in-flight key moves to completed. Completing it again with the same
+	// response is a no-op that succeeds; with a different response it is
+	// ErrAlreadyCompleted and the stored response is kept; an unknown key is
+	// ErrNotClaimed.
 	Complete(ctx context.Context, key Key, response []byte) error
 }

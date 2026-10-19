@@ -113,20 +113,32 @@ func firstMeta(ctx context.Context, key string) string {
 
 // Status maps platform errors to gRPC status codes:
 //
+//	context.Canceled             -> CANCELED            (wrapped too: the caller went away)
+//	context.DeadlineExceeded     -> DEADLINE_EXCEEDED   (wrapped too: the caller's budget ran out)
 //	tenant.ErrMissing            -> FAILED_PRECONDITION (tenant_missing)
 //	config.ErrUnknownTenant      -> PERMISSION_DENIED   (fail closed)
 //	idempotency.ErrFingerprint.. -> FAILED_PRECONDITION (fingerprint_mismatch; state-dependent, terminal)
 //	idempotency.ErrInFlight      -> ABORTED             (in_flight; the one retryable conflict)
 //	idempotency.ErrNotClaimed    -> INTERNAL            (idempotency_not_claimed; a wiring bug,
 //	                                                     tagged so it is not mistaken for an outage)
+//	idempotency.ErrAlreadyComp.. -> INTERNAL            (idempotency_already_completed; a wiring
+//	                                                     bug of the same kind)
 //	anything else                -> INTERNAL, message scrubbed
 //
 // NOT UNAUTHENTICATED for a missing tenant: that trips client credential
 // machinery, and the metadata is infra-set, not a credential. Service-specific
 // errors (validation, gate denials, domain rejections) are mapped by the
 // service's own transport before falling back here.
+//
+// The context errors come first and match through wrapping: a query cut short
+// by the caller's deadline surfaces as a wrapped driver error, and as INTERNAL
+// it read as a server fault, paged as one, and was retried as one.
 func Status(err error) error {
 	switch {
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, "request cancelled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, "deadline exceeded")
 	case errors.Is(err, tenant.ErrMissing):
 		return withReason(codes.FailedPrecondition, "no tenant id in metadata", "tenant_missing")
 	case errors.Is(err, config.ErrUnknownTenant):
@@ -141,6 +153,10 @@ func Status(err error) error {
 		// indistinguishable from the database being down — so the on-call
 		// investigates infrastructure while the fault is in the command.
 		return withReason(codes.Internal, "internal error", "idempotency_not_claimed")
+	case errors.Is(err, idempotency.ErrAlreadyCompleted):
+		// Completing a key twice with different answers is the same kind of
+		// wiring bug: the command ran twice inside one claim.
+		return withReason(codes.Internal, "internal error", "idempotency_already_completed")
 	default:
 		return status.Error(codes.Internal, "internal error")
 	}

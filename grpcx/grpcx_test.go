@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"testing"
@@ -34,6 +35,13 @@ func TestStatusMapping(t *testing.T) {
 		{config.ErrUnknownTenant, codes.PermissionDenied, ""},
 		{idempotency.ErrFingerprintMismatch, codes.FailedPrecondition, "fingerprint_mismatch"},
 		{idempotency.ErrInFlight, codes.Aborted, "in_flight"},
+		{idempotency.ErrNotClaimed, codes.Internal, "idempotency_not_claimed"},
+		{idempotency.ErrAlreadyCompleted, codes.Internal, "idempotency_already_completed"},
+		{context.Canceled, codes.Canceled, ""},
+		{context.DeadlineExceeded, codes.DeadlineExceeded, ""},
+		// Wrapped, as a driver or a store returns them.
+		{fmt.Errorf("query: %w", context.Canceled), codes.Canceled, ""},
+		{fmt.Errorf("claim: %w", fmt.Errorf("exec: %w", context.DeadlineExceeded)), codes.DeadlineExceeded, ""},
 		{errors.New("some sql thing with a password in it"), codes.Internal, ""},
 	}
 	for _, c := range cases {

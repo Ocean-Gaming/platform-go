@@ -11,13 +11,27 @@ import (
 // It is deliberately dumb: poll, publish, mark. It never blocks a producer, and
 // on failure it simply leaves rows unpublished for the next tick. Delivery is
 // at-least-once by construction, which is why consumers dedup.
+//
+// A full batch is followed at once by the next one; the relay waits Interval
+// only after a batch that was short, empty or failed. Waiting after every batch
+// capped every service at Batch/Interval events a second, so a backlog of
+// 100,000 rows took over a quarter of an hour to drain at the defaults.
 type Relay struct {
 	Reader    Reader
 	Publisher Publisher
 	Batch     int
 	Interval  time.Duration
-	Log       *slog.Logger
+
+	// TickTimeout bounds one Tick: the read, the publish and the mark. Default
+	// 30 s. Without it a publish that never returned stalled the relay for good,
+	// and silently: Tick never failed, so the failure log below never fired.
+	TickTimeout time.Duration
+
+	Log *slog.Logger
 }
+
+// DefaultTickTimeout is TickTimeout's default.
+const DefaultTickTimeout = 30 * time.Second
 
 // Run polls until ctx is cancelled.
 func (r *Relay) Run(ctx context.Context) error {
@@ -30,9 +44,6 @@ func (r *Relay) Run(ctx context.Context) error {
 	if r.Log == nil {
 		r.Log = slog.Default()
 	}
-
-	t := time.NewTicker(r.Interval)
-	defer t.Stop()
 
 	// How long this relay has been failing, not just that it failed again.
 	//
@@ -47,13 +58,29 @@ func (r *Relay) Run(ctx context.Context) error {
 	var fails int
 	var since time.Time
 
+	// The first batch goes at once: a service that restarts with a backlog has
+	// no reason to sit on it for an Interval.
+	wait := time.NewTimer(0)
+	defer wait.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-t.C:
+		case <-wait.C:
+		}
+
+		// Drain: keep going while batches come back full. The cancellation
+		// check sits between batches, so shutdown never waits on a backlog.
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			n, err := r.Tick(ctx)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err() // shutdown, not an outage
+				}
 				// Log and keep going. The rows are still in the outbox, so the
 				// next tick retries them; nothing is lost.
 				if fails == 0 {
@@ -64,7 +91,7 @@ func (r *Relay) Run(ctx context.Context) error {
 					"error", err, "published", n,
 					"consecutive_failures", fails,
 					"failing_for", time.Since(since).Round(time.Second).String())
-				continue
+				break
 			}
 			if fails > 0 {
 				// Recovery is reported at INFO because the outage was: an
@@ -82,13 +109,31 @@ func (r *Relay) Run(ctx context.Context) error {
 				// It stays at debug because a healthy relay ticks every second.
 				r.Log.DebugContext(ctx, "outbox relay published", "count", n)
 			}
+			// A short batch means the backlog is drained. A full one means there
+			// may be more. This is not a busy loop: a full batch is only
+			// followed at once when the previous one was published AND marked,
+			// so the same rows cannot come back.
+			if n < r.Batch {
+				break
+			}
 		}
+		wait.Reset(r.Interval)
 	}
 }
 
 // Tick publishes at most one batch. Exposed so tests can drive the relay
 // deterministically instead of sleeping.
+//
+// The whole tick runs under TickTimeout, the publish included, so a broker that
+// accepts the connection and never answers surfaces as a failed tick.
 func (r *Relay) Tick(ctx context.Context) (int, error) {
+	timeout := r.TickTimeout
+	if timeout <= 0 {
+		timeout = DefaultTickTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	msgs, err := r.Reader.Unpublished(ctx, r.Batch)
 	if err != nil {
 		return 0, err

@@ -58,7 +58,15 @@ func (f CheckerFunc) Check(ctx context.Context) (Decision, error) { return f(ctx
 // FailClosed runs c with a timeout and converts every abnormal outcome into a
 // denial. It never returns an error: the caller gets a Decision it can act on,
 // which removes the "forgot to handle the error and continued" failure mode.
+//
+// A request that has already ended is denied without running c. An Allow that
+// arrives after the request ended is denied too: when the answer and the
+// cancellation are both ready, select picks either, so a checker that ignored
+// its context could otherwise get an Allow through about half the time.
 func FailClosed(ctx context.Context, timeout time.Duration, c Checker) (d Decision) {
+	if err := ctx.Err(); err != nil {
+		return ended(err)
+	}
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
@@ -89,14 +97,22 @@ func FailClosed(ctx context.Context, timeout time.Duration, c Checker) (d Decisi
 
 	select {
 	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return Deny("gate timed out")
-		}
-		return Deny("gate cancelled")
+		return ended(ctx.Err())
 	case r := <-ch:
 		if r.err != nil {
 			return Deny("gate errored: " + r.err.Error())
 		}
+		if r.d.Allowed && ctx.Err() != nil {
+			return ended(ctx.Err())
+		}
 		return r.d
 	}
+}
+
+// ended is the denial for a request that ran out of time or was cancelled.
+func ended(err error) Decision {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return Deny("gate timed out")
+	}
+	return Deny("gate cancelled")
 }

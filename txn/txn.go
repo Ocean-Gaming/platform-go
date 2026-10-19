@@ -7,17 +7,19 @@
 // between them either double-credits a player or loses the event announcing a
 // credit that did happen.
 //
-// Nothing in the type system used to enforce that. The Postgres stores take a
-// pg.DBTX, and *sql.DB satisfies pg.DBTX, so wiring
+// Nothing in the type system used to enforce that. Until v0.5.0 the Postgres
+// stores took a pg.DBTX, and *sql.DB satisfies pg.DBTX, so wiring
 //
-//	Idempotency: idempotency.NewPostgresStore(db)   // <- compiles, and is wrong
+//	Idempotency: idempotency.NewPostgresStore(db)   // <- compiled, and was wrong
 //
 // produced three autocommit statements that look exactly like one transaction
 // until the process dies between them. A service could hold every rule and
-// still lose money.
+// still lose money. The write constructors now take a *sql.Tx, so that line no
+// longer compiles; only outbox.NewPostgresReader, the relay's view, takes the
+// pool.
 //
-// A Runner closes that: stores exist only INSIDE the unit of work, bound to its
-// transaction, so there is no way to hold one across a commit boundary.
+// A Runner closes the rest: stores exist only INSIDE the unit of work, bound to
+// its transaction, so there is no way to hold one across a commit boundary.
 package txn
 
 import (
