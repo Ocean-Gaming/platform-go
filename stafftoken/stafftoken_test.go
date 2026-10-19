@@ -58,8 +58,13 @@ func newKey(t *testing.T) keyPair {
 	t.Helper()
 	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	enc := base64.RawURLEncoding.EncodeToString
+	// The SEC 1 uncompressed point, 0x04 ‖ X ‖ Y: PublicKey.X and .Y are deprecated in Go 1.26.
+	point, err := k.PublicKey.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
 	set, _ := json.Marshal(map[string]any{"keys": []map[string]string{{"kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256",
-		"x": enc(k.PublicKey.X.FillBytes(make([]byte, 32))), "y": enc(k.PublicKey.Y.FillBytes(make([]byte, 32)))}}})
+		"x": enc(point[1:33]), "y": enc(point[33:])}}})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(set) }))
 	t.Cleanup(srv.Close)
 	return keyPair{key: k, url: srv.URL}

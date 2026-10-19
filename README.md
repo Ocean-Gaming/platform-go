@@ -122,3 +122,11 @@ Behaviour that a service may notice on upgrade:
   denies an Allow that arrives after cancellation.
 - A staff token needs `iat`, and `exp - iat` may not exceed `MaxLifetime` (default one minute,
   operations-service's TTL).
+
+### v0.5.1
+
+Go 1.26 is the floor (`go 1.26.0` in go.mod; CI installs the newest 1.26.x). Go 1.25 is out of
+support and gets no fix for the nine net/http, net/textproto and crypto/tls advisories published
+on 2026-10-08 (GO-2026-6603 to GO-2026-6617), fixed in go1.26.9. `golang.org/x/net` is at v0.60.0
+for the same advisories. A service taking this version has its own `go` directive raised to 1.26.0
+by `go get`, and its CI's `go-version` must follow.
