@@ -19,7 +19,34 @@ func (i ID) String() string { return string(i) }
 
 // Valid reports whether the id is well-formed. Empty or whitespace-only ids are
 // rejected so a blank tenant can never silently become a wildcard.
+//
+// During the ADR-0127 cut-over both the UUID and the slug it replaces are
+// valid; phase 5 of that programme makes this IsUUID.
 func (i ID) Valid() bool { return strings.TrimSpace(string(i)) != "" }
+
+// IsUUID reports whether the id is in the form ADR-0127 makes the tenant id:
+// a canonical lowercase UUID, 8-4-4-4-12 hex digits. The slug form fails it.
+// Services use this to tell the two apart while they accept both.
+func (i ID) IsUUID() bool {
+	s := string(i)
+	if len(s) != 36 {
+		return false
+	}
+	for j := 0; j < 36; j++ {
+		c := s[j]
+		switch j {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // ErrMissing is returned when a code path that requires a tenant is reached
 // without one in context. Callers should treat this as a fail-closed condition,

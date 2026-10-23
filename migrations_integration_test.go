@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
@@ -15,7 +16,9 @@ import (
 
 	platform "github.com/Ocean-Gaming/platform-go"
 	"github.com/Ocean-Gaming/platform-go/idempotency"
+	pg2 "github.com/Ocean-Gaming/platform-go/pg"
 	"github.com/Ocean-Gaming/platform-go/pgtest"
+	"github.com/Ocean-Gaming/platform-go/tenant"
 )
 
 // The seven constraints migrations/0003 adds, by table.
@@ -175,9 +178,62 @@ func TestOldRowsThatBreakACheckDoNotStopTheBoot(t *testing.T) {
 	}
 }
 
-// The down path both migrations describe, and the way back up from it.
+// 0005: state is an ENUM, so a third value is refused by the type itself, and the migration
+// re-applies without touching a converted column.
+func TestStateIsAnEnumOfItsTwoValues(t *testing.T) {
+	db := pgtest.Open(t)
+	applyPlatform(t, db) // a second boot
+	var typ string
+	if err := db.QueryRow(`SELECT udt_name FROM information_schema.columns WHERE table_name = 'idempotency_keys' AND column_name = 'state'`).Scan(&typ); err != nil {
+		t.Fatal(err)
+	}
+	if typ != "idempotency_state" {
+		t.Fatalf("state is %s, want idempotency_state", typ)
+	}
+	if exists, _ := validated(t, db, "idempotency_keys_state_check"); exists {
+		t.Fatal("the TEXT-era CHECK on state survived the conversion")
+	}
+	fp := idempotency.Fingerprint([]byte("cmd"))
+	_, err := db.Exec(`INSERT INTO idempotency_keys (tenant_id, key, fingerprint, state) VALUES ('acme', 'k-x', $1, 'done')`, fp)
+	var pg *pgconn.PgError
+	if !errors.As(err, &pg) || pg.Code != "22P02" {
+		t.Fatalf("a third state: want invalid enum input (22P02), got %v", err)
+	}
+	// The Go stores still write and read the two values as strings.
+	ctx := tenant.NewContext(context.Background(), "acme")
+	if err := pg2.InTx(ctx, db, func(tx *sql.Tx) error {
+		st := idempotency.NewPostgresStore(tx)
+		if _, _, err := st.Claim(ctx, "k-enum", fp); err != nil {
+			return err
+		}
+		return st.Complete(ctx, "k-enum", []byte(`{}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg2.InTx(ctx, db, func(tx *sql.Tx) error {
+		rec, replay, err := idempotency.NewPostgresStore(tx).Claim(ctx, "k-enum", fp)
+		if err != nil || !replay || rec.State != idempotency.StateCompleted {
+			return fmt.Errorf("replay=%v state=%q err=%v", replay, rec.State, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The down path the migrations describe, and the way back up from it.
 func TestTheDownPathRestoresTheOldSchemaAndTheUpPathReturns(t *testing.T) {
 	db := pgtest.Open(t)
+	// 0005's down path first, as the file states it: the completed_at check dropped and re-added
+	// around the conversion (its stored expression is typed), the column back to TEXT with its
+	// old CHECK, and the type dropped.
+	if _, err := db.Exec(`ALTER TABLE idempotency_keys DROP CONSTRAINT idempotency_keys_completed_at_matches_state;
+		ALTER TABLE idempotency_keys ALTER COLUMN state TYPE TEXT USING state::text;
+		ALTER TABLE idempotency_keys ADD CONSTRAINT idempotency_keys_completed_at_matches_state CHECK ((state = 'completed') = (completed_at IS NOT NULL));
+		ALTER TABLE idempotency_keys ADD CONSTRAINT idempotency_keys_state_check CHECK (state IN ('in_flight', 'completed'));
+		DROP TYPE idempotency_state`); err != nil {
+		t.Fatalf("0005 down path: %v", err)
+	}
 	for name, table := range checks {
 		if _, err := db.Exec(`ALTER TABLE ` + table + ` DROP CONSTRAINT IF EXISTS ` + name); err != nil {
 			t.Fatalf("drop %s: %v", name, err)
@@ -204,5 +260,12 @@ func TestTheDownPathRestoresTheOldSchemaAndTheUpPathReturns(t *testing.T) {
 	}
 	if def := unpublishedIndex(t, db); !strings.Contains(def, "(occurred_at, id)") {
 		t.Fatalf("after re-applying, outbox_unpublished_idx is %q", def)
+	}
+	var typ string
+	if err := db.QueryRow(`SELECT udt_name FROM information_schema.columns WHERE table_name = 'idempotency_keys' AND column_name = 'state'`).Scan(&typ); err != nil {
+		t.Fatal(err)
+	}
+	if typ != "idempotency_state" {
+		t.Fatalf("after re-applying, state is %s", typ)
 	}
 }

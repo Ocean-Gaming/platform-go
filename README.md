@@ -75,15 +75,35 @@ Every service should run both harnesses. See `conformance_memory_test.go` and
 
     go get github.com/Ocean-Gaming/platform-go
 
-The module is **public**, so nothing needs credentials — locally or in CI. It carries no
-business logic and no secrets: it is tenant propagation, idempotency, an outbox, an inbox,
-a config snapshot, fail-closed gates and the gRPC conventions. The gambling domain lives
-in the service repos, which stay private.
+The module is **private**, like every other Ocean-Gaming repository (meta-repo ADR-0129;
+the visibility flips at the end of platform-meta `docs/runbooks/platform-go-private.md`,
+and until then the public repository is served exactly the same way). Module path, import
+paths, tags and pinned versions are unchanged. What changes is who may fetch it:
 
-That is a deliberate trade. Kept private, every one of 36 consuming repos would have
-needed a personal access token as a CI secret, because a repository's default
-`GITHUB_TOKEN` cannot read a sibling private repo — 36 secrets to rotate, on the
-dependency every service builds against.
+- **CI** authenticates as the Ocean CI **GitHub App** (`Contents: read` on the
+  organisation's repositories, nothing else). Each consuming repository holds the App id and
+  private key as the repository secrets `OCEAN_APP_ID` and `OCEAN_APP_PRIVATE_KEY`; its
+  `.github/actions/private-modules` action mints a one-hour installation token, sets
+  `GOPRIVATE=github.com/Ocean-Gaming/*` and configures git's `insteadOf` rewrite in process
+  scope, so no token lands in `go.mod`, in a file or in a layer. The former
+  `ORG_MODULE_TOKEN` personal token is a fallback for one release and then goes.
+- **Docker builds** mount a netrc as a BuildKit secret (`--secret id=netrc`); the stack's
+  runbook, platform-meta `deploy/ocean/README.md`, says how to produce one from the App.
+- **A laptop** sets `GOPRIVATE=github.com/Ocean-Gaming/*` and lets git authenticate as
+  usual (SSH, a credential helper, or a `~/.netrc` holding a fine-grained token with
+  `Contents: read`). `GOPRIVATE` also keeps `go` from asking `sum.golang.org` about these
+  versions, which it could not answer.
+
+Making the repository private hides nothing already released. Every version fetched so far,
+**v0.3.5 up to v0.6.0, stays on `proxy.golang.org` and `sum.golang.org` for good**; only
+versions tagged after the flip are protected. An anonymous `go mod download` of v0.6.0 with
+the default `GOPROXY` therefore still succeeds, and the proof that the flip worked is the
+one with `GOPROXY=direct`, which must fail.
+
+It was public before by a deliberate trade: kept private, every consuming repository would
+have needed a personal access token as a CI secret, because a repository's default
+`GITHUB_TOKEN` cannot read a sibling private repository. `event-bus` going private made
+that secret necessary anyway, and the App replaces the personal token in every repository.
 
 ## Tests
 
@@ -155,3 +175,18 @@ Lengths are characters, not bytes, on both sides.
 
 A service must apply every file in `platform.Migrations()`. One that copies `0001_platform.sql`
 by name gets neither these nor 0002.
+
+### v0.7.0
+
+- `retention`: the sweeper ADR-0130 describes. Four policies, every one opt-in with no default
+  period: `PublishedOutbox{After}`, `Inbox{After}` (at least 7 days), `IdempotencyResponse{ClearAfter}`
+  (nulls the response, keeps the key) and `IdempotencyKey{DeleteAfter}` (never shorter than
+  `ClearAfter`). Unpublished outbox rows and in-flight keys are never aged out; an in-flight key
+  older than a day is reported as a crashed command. Bounded batches, one tenant at a time, a
+  `BeforeBatch` hook for a service's RLS setting. A service that enables a policy adds the index
+  its DELETE needs in its own migration; this module ships none.
+- `tenant.ID.IsUUID`: the canonical lowercase UUID form ADR-0127 makes the tenant id. `Valid()`
+  still accepts the slug for the cut-over.
+- `0005_idempotency_state_enum.sql`: `idempotency_keys.state` is the ENUM `idempotency_state`
+  (`in_flight`, `completed`). The Go stores are unchanged; 0003's `completed_at` check is
+  re-created across the conversion.
